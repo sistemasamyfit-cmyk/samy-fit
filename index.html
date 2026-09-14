@@ -116,10 +116,10 @@
     </style>
 </head>
 <body class="h-screen w-full">
-    <div id="carga-overlay-global" class="cargando-overlay flex flex-col hidden" style="display:none;">
+    <div id="carga-overlay-global" class="cargando-overlay flex flex-col">
         <div class="text-center">
             <div class="cargando-spinner mx-auto mb-4"></div>
-            <p class="text-lg font-black text-white mb-6" id="carga-overlay-msg">Procesando...</p>
+            <p class="text-lg font-black text-white mb-6" id="carga-overlay-msg">Conectando con la Nube...</p>
         </div>
     </div>
 
@@ -263,7 +263,6 @@
 
     <!-- ================= CATÁLOGO PÚBLICO (MODO TIENDA) ================= -->
     <div id="public-catalog" class="hidden flex-col fixed inset-0 z-[99999] overflow-y-auto bg-base">
-        <!-- BOTÓN SUBIR TOP (NUEVO) -->
         <button id="btn-subir-top" onclick="document.getElementById('public-catalog').scrollTo({top: 0, behavior: 'smooth'})">
             <i class="fas fa-chevron-up"></i>
         </button>
@@ -384,7 +383,6 @@
                 </div>
                 <div><label class="text-[9px] font-bold text-muted uppercase block mb-1">Nombre de Producto</label><input type="text" id="stock-nombre" class="w-full border border-borderline bg-input text-main p-2.5 rounded-lg text-sm font-bold" required></div>
                 
-                <!-- AGREGADO CAMPO DESCRIPCIÓN -->
                 <div>
                     <label class="text-[9px] font-bold text-muted uppercase block mb-1">Descripción (Opcional - Máx 300 car.)</label>
                     <textarea id="stock-desc" rows="2" maxlength="300" class="w-full border border-borderline bg-input text-main p-2.5 rounded-lg text-xs resize-none placeholder-muted" placeholder="Detalles, medidas, materiales..."></textarea>
@@ -412,7 +410,16 @@
         let firestoreDb = null; let esModoNube = false; let firebaseLoaded = false;
         let isUploading = false; 
 
-        try { if (typeof firebase !== 'undefined') { firebase.initializeApp(firebaseConfig); firestoreDb = firebase.firestore(); esModoNube = true; } } catch(err) {}
+        // ==========================================
+        // AUTO-INICIALIZACIÓN Y CONEXIÓN INTELIGENTE
+        // ==========================================
+        try { 
+            if (typeof firebase !== 'undefined') { 
+                firebase.initializeApp(firebaseConfig); 
+                firestoreDb = firebase.firestore(); 
+                esModoNube = true; 
+            } 
+        } catch(err) {}
 
         let db = { config: {}, usuarios: [], productos: [] };
         
@@ -434,13 +441,14 @@
         const debouncedRenderTienda = debounce(() => renderTiendaWeb(), 200);
         const isTiendaWeb = window.location.href.toLowerCase().includes('modo=tienda');
 
+        // FUNCIÓN DE GUARDADO CON AUTO-CREACIÓN REMOTA ({ merge: true })
         function guardarBD() {
             return new Promise((resolve) => {
                 isUploading = true;
                 try {
                     guardarLocal(db); 
                     if(esModoNube && firestoreDb) {
-                        firestoreDb.collection("lite_erp").doc("tienda_base").set(db)
+                        firestoreDb.collection("lite_erp").doc("tienda_base").set(db, { merge: true })
                             .then(() => resolve(true))
                             .catch(e => { console.error(e); resolve(false); });
                     } else { resolve(true); }
@@ -453,7 +461,6 @@
             try { localStorage.setItem('catalogo_tienda_base', JSON.stringify(baseData)); } catch(e) {}
         }
 
-        // LÓGICA DEL BOTÓN FLOTANTE "SUBIR"
         document.addEventListener('DOMContentLoaded', () => {
             const catalogo = document.getElementById('public-catalog');
             const btnSubir = document.getElementById('btn-subir-top');
@@ -763,7 +770,7 @@
             document.getElementById('stock-sku').value=p.sku||''; 
             document.getElementById('stock-cat').value=p.categoria||''; 
             document.getElementById('stock-nombre').value=p.nombre; 
-            document.getElementById('stock-desc').value=p.desc||''; // Agregado desc
+            document.getElementById('stock-desc').value=p.desc||''; 
             document.getElementById('stock-precio').value=p.precio; 
             document.getElementById('stock-cantidad').value=p.cantidad; 
             document.getElementById('modal-stock-title').innerText='Editar'; 
@@ -774,7 +781,7 @@
             document.getElementById('stock-sku').value=''; 
             document.getElementById('stock-cat').value=''; 
             document.getElementById('stock-nombre').value=''; 
-            document.getElementById('stock-desc').value=''; // Agregado desc
+            document.getElementById('stock-desc').value=''; 
             document.getElementById('stock-precio').value=''; 
             document.getElementById('stock-cantidad').value='999'; 
             document.getElementById('modal-stock-title').innerText='Nuevo'; 
