@@ -428,6 +428,7 @@
             if(!db.config.pinAdmin) db.config.pinAdmin = '1234';
             if(!db.usuarios || db.usuarios.length===0) db.usuarios = [ { id: 'admin', nombre: 'Admin', pin: '1234' } ];
             if(!Array.isArray(db.productos)) db.productos = [];
+            else db.productos = db.productos.filter(p => p && typeof p === 'object' && p.id); // Protección contra nodos corruptos
         }
         
         try { const s = localStorage.getItem('catalogo_tienda_base'); if (s) { const p = JSON.parse(s); if (p && typeof p === 'object') { db = { ...db, ...p }; } } } catch (e) {}
@@ -442,6 +443,7 @@
         const isTiendaWeb = window.location.href.toLowerCase().includes('modo=tienda');
 
         // FUNCIÓN DE GUARDADO CON AUTO-CREACIÓN REMOTA ({ merge: true })
+        // CATCHEANDO EL LÍMITE DE 1MB DE FIRESTORE
         function guardarBD() {
             return new Promise((resolve) => {
                 isUploading = true;
@@ -450,7 +452,15 @@
                     if(esModoNube && firestoreDb) {
                         firestoreDb.collection("lite_erp").doc("tienda_base").set(db, { merge: true })
                             .then(() => resolve(true))
-                            .catch(e => { console.error(e); resolve(false); });
+                            .catch(e => { 
+                                console.error("Error Firebase:", e);
+                                if(e.message && e.message.includes('exceeds')) {
+                                    mostrarToast("Límite de 1MB superado. Firebase falló. Usá menos fotos o resolvé la BD.", "bg-[#ef4444]");
+                                } else {
+                                    mostrarToast("Error de sincronización con la nube.", "bg-[#ef4444]");
+                                }
+                                resolve(false); 
+                            });
                     } else { resolve(true); }
                 } catch (e) { resolve(false); }
                 finally { setTimeout(() => { isUploading = false; }, 800); }
@@ -489,10 +499,11 @@
             }
 
             if(esModoNube && firestoreDb) {
+                // BUGFIX ARCHITECTURE: Aseguramos destrabar UI independientemente de fallos o modo
                 let fbTimeout = setTimeout(() => { 
                     if(!firebaseLoaded) { 
                         firebaseLoaded = true; 
-                        if(!isTiendaWeb) iniciarAppSegunRouting(); 
+                        iniciarAppSegunRouting(); 
                     } 
                 }, 4000);
                 
@@ -500,23 +511,27 @@
                     clearTimeout(fbTimeout);
                     if(isUploading) return; 
 
-                    if(doc.exists) { 
-                        db = doc.data();
-                        verificarIntegridadDB(); 
-                        aplicarConfiguracion(); 
-                        actualizarUI();
-                        if(isTiendaWeb) {
-                            renderCats();
-                            renderTiendaWeb();
+                    try {
+                        if(doc.exists) { 
+                            db = doc.data();
+                            verificarIntegridadDB(); 
+                            aplicarConfiguracion(); 
+                            actualizarUI();
+                            if(isTiendaWeb) {
+                                renderCats();
+                                renderTiendaWeb();
+                            }
+                        } else { 
+                            guardarBD(); 
                         }
-                    } else { 
-                        guardarBD(); 
+                    } catch (e) {
+                        console.error("Fallo de render o parseo post-firebase", e);
+                    } finally {
+                        if(!firebaseLoaded) { 
+                            firebaseLoaded = true; 
+                            iniciarAppSegunRouting(); 
+                        } 
                     }
-                    
-                    if(!firebaseLoaded) { 
-                        firebaseLoaded = true; 
-                        iniciarAppSegunRouting(); 
-                    } 
                 }, err => { 
                     clearTimeout(fbTimeout); 
                     if(!firebaseLoaded) { 
@@ -849,9 +864,22 @@
                     let h = json[0].map(x=>String(x||'').toLowerCase().trim());
                     let cs=h.findIndex(x=>x.includes('sku')||x.includes('cod')), cn=h.findIndex(x=>x.includes('nombre')||x.includes('producto')), cp=h.findIndex(x=>x.includes('precio')), ccat=h.findIndex(x=>x.includes('cat')), ccant=h.findIndex(x=>x.includes('stock')), cdesc=h.findIndex(x=>x.includes('desc'));
                     if(cn===-1 || cp===-1) throw new Error("Falta Nombre o Precio en el Excel");
+                    
                     for(let i=1; i<json.length; i++) {
                         let row=json[i]; if(!row || !row[cn]) continue;
-                        let sku=cs!==-1?String(row[cs]||'').trim():'', n=String(row[cn]).trim(), pr=parseFloat(String(row[cp]).replace(',','.'))||0, cat=ccat!==-1?String(row[ccat]||'').toUpperCase().trim():'VARIOS', cant=ccant!==-1?parseInt(row[ccant])||0:999, desc=cdesc!==-1?String(row[cdesc]||'').trim():'';
+                        
+                        let sku = cs !== -1 ? String(row[cs]||'').trim() : '';
+                        let n = String(row[cn]).trim();
+                        let pr = parseFloat(String(row[cp]).replace(',','.')) || 0;
+                        let cat = ccat !== -1 ? String(row[ccat]||'').toUpperCase().trim() : 'VARIOS';
+                        
+                        // BUGFIX EXCEL PARSER: Resguardar celdas de stock vacías a 999 para evitar que oculten el producto.
+                        let valStock = row[ccant];
+                        let cant = (ccant !== -1 && valStock != null && String(valStock).trim() !== '') ? parseInt(valStock) : 999;
+                        if(isNaN(cant)) cant = 0; 
+                        
+                        let desc = cdesc !== -1 ? String(row[cdesc]||'').trim() : '';
+                        
                         let ex = db.productos.find(x=>(sku&&x.sku===sku) || (x.nombre||'').toLowerCase()===n.toLowerCase());
                         if(ex) { ex.precio=pr; ex.cantidad=cant; if(cat) ex.categoria=cat; if(desc) ex.desc=desc; } else db.productos.push({id:'id'+Date.now()+i, sku, categoria:cat, nombre:n, desc:desc, precio:pr, cantidad:cant, imagenBase64:''});
                     }
