@@ -28,6 +28,8 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700;800&family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    
+    <!-- FIREBASE CORE & FIRESTORE SOLAMENTE -->
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
     
@@ -119,7 +121,8 @@
     <div id="carga-overlay-global" class="cargando-overlay flex flex-col">
         <div class="text-center">
             <div class="cargando-spinner mx-auto mb-4"></div>
-            <p class="text-lg font-black text-white mb-6" id="carga-overlay-msg">Conectando con la Nube...</p>
+            <p class="text-lg font-black text-white mb-2" id="carga-overlay-msg">Conectando con la Nube...</p>
+            <p class="text-xs text-muted" id="carga-overlay-submsg"></p>
         </div>
     </div>
 
@@ -428,7 +431,7 @@
             if(!db.config.pinAdmin) db.config.pinAdmin = '1234';
             if(!db.usuarios || db.usuarios.length===0) db.usuarios = [ { id: 'admin', nombre: 'Admin', pin: '1234' } ];
             if(!Array.isArray(db.productos)) db.productos = [];
-            else db.productos = db.productos.filter(p => p && typeof p === 'object' && p.id); // Protección contra nodos corruptos
+            else db.productos = db.productos.filter(p => p && typeof p === 'object' && p.id); 
         }
         
         try { const s = localStorage.getItem('catalogo_tienda_base'); if (s) { const p = JSON.parse(s); if (p && typeof p === 'object') { db = { ...db, ...p }; } } } catch (e) {}
@@ -442,29 +445,38 @@
         const debouncedRenderTienda = debounce(() => renderTiendaWeb(), 200);
         const isTiendaWeb = window.location.href.toLowerCase().includes('modo=tienda');
 
-        // FUNCIÓN DE GUARDADO CON AUTO-CREACIÓN REMOTA ({ merge: true })
-        // CATCHEANDO EL LÍMITE DE 1MB DE FIRESTORE
-        function guardarBD() {
-            return new Promise((resolve) => {
-                isUploading = true;
-                try {
-                    guardarLocal(db); 
-                    if(esModoNube && firestoreDb) {
-                        firestoreDb.collection("lite_erp").doc("tienda_base").set(db, { merge: true })
-                            .then(() => resolve(true))
-                            .catch(e => { 
-                                console.error("Error Firebase:", e);
-                                if(e.message && e.message.includes('exceeds')) {
-                                    mostrarToast("Límite de 1MB superado. Firebase falló. Usá menos fotos o resolvé la BD.", "bg-[#ef4444]");
-                                } else {
-                                    mostrarToast("Error de sincronización con la nube.", "bg-[#ef4444]");
-                                }
-                                resolve(false); 
-                            });
-                    } else { resolve(true); }
-                } catch (e) { resolve(false); }
-                finally { setTimeout(() => { isUploading = false; }, 800); }
-            });
+        // NUEVA FUNCIÓN GUARDAR BD POR LOTES (BATCH)
+        async function guardarBD() {
+            guardarLocal(db);
+            if(!esModoNube || !firestoreDb) return true;
+
+            isUploading = true;
+            try {
+                // 1. Guardar Config en doc principal
+                const baseRef = firestoreDb.collection("lite_erp").doc("tienda_base");
+                await baseRef.set({ config: db.config, usuarios: db.usuarios }, { merge: true });
+
+                // 2. Guardar Productos en Subcolección (por lotes de a 400 para evitar limites)
+                const prodRef = baseRef.collection("productos");
+                const chunks = [];
+                for (let i = 0; i < db.productos.length; i += 400) {
+                    chunks.push(db.productos.slice(i, i + 400));
+                }
+
+                for (const chunk of chunks) {
+                    const batch = firestoreDb.batch();
+                    chunk.forEach(p => {
+                        batch.set(prodRef.doc(p.id), p);
+                    });
+                    await batch.commit();
+                }
+                return true;
+            } catch (e) {
+                console.error("Error guardando en Firestore:", e);
+                return false;
+            } finally {
+                setTimeout(() => { isUploading = false; }, 800);
+            }
         }
 
         function guardarLocal(baseData) {
@@ -477,11 +489,8 @@
             
             if(catalogo && btnSubir) {
                 catalogo.addEventListener('scroll', () => {
-                    if (catalogo.scrollTop > 300) {
-                        btnSubir.classList.add('visible');
-                    } else {
-                        btnSubir.classList.remove('visible');
-                    }
+                    if (catalogo.scrollTop > 300) btnSubir.classList.add('visible');
+                    else btnSubir.classList.remove('visible');
                 });
             }
         });
@@ -499,7 +508,6 @@
             }
 
             if(esModoNube && firestoreDb) {
-                // BUGFIX ARCHITECTURE: Aseguramos destrabar UI independientemente de fallos o modo
                 let fbTimeout = setTimeout(() => { 
                     if(!firebaseLoaded) { 
                         firebaseLoaded = true; 
@@ -507,37 +515,42 @@
                     } 
                 }, 4000);
                 
-                firestoreDb.collection("lite_erp").doc("tienda_base").onSnapshot(doc => {
-                    clearTimeout(fbTimeout);
-                    if(isUploading) return; 
+                const baseRef = firestoreDb.collection("lite_erp").doc("tienda_base");
+                const prodRef = baseRef.collection("productos");
 
-                    try {
-                        if(doc.exists) { 
-                            db = doc.data();
-                            verificarIntegridadDB(); 
-                            aplicarConfiguracion(); 
-                            actualizarUI();
-                            if(isTiendaWeb) {
-                                renderCats();
-                                renderTiendaWeb();
-                            }
-                        } else { 
-                            guardarBD(); 
-                        }
-                    } catch (e) {
-                        console.error("Fallo de render o parseo post-firebase", e);
-                    } finally {
-                        if(!firebaseLoaded) { 
-                            firebaseLoaded = true; 
-                            iniciarAppSegunRouting(); 
-                        } 
+                // Escuchar Config
+                baseRef.onSnapshot(doc => {
+                    if(isUploading) return; 
+                    if(doc.exists) { 
+                        const data = doc.data();
+                        db.config = data.config || db.config;
+                        db.usuarios = data.usuarios || db.usuarios;
+                        aplicarConfiguracion(); 
                     }
-                }, err => { 
-                    clearTimeout(fbTimeout); 
+                });
+
+                // Escuchar Subcolección de Productos
+                prodRef.onSnapshot(snap => {
+                    clearTimeout(fbTimeout);
+                    if(isUploading) return;
+
+                    db.productos = snap.docs.map(d => d.data());
+                    verificarIntegridadDB(); 
+                    guardarLocal(db); 
+                    actualizarUI();
+                    
+                    if(isTiendaWeb) {
+                        renderCats();
+                        renderTiendaWeb();
+                    }
+
                     if(!firebaseLoaded) { 
                         firebaseLoaded = true; 
                         iniciarAppSegunRouting(); 
                     } 
+                }, err => { 
+                    clearTimeout(fbTimeout); 
+                    if(!firebaseLoaded) { firebaseLoaded = true; iniciarAppSegunRouting(); } 
                 });
             } else { 
                 iniciarAppSegunRouting(); 
@@ -814,31 +827,45 @@
                 
             if(!n) return mostrarToast('Falta nombre', 'bg-[#ef4444]');
             
+            let p;
             if(id) { 
-                let p=db.productos.find(x=>x.id===id); 
+                p = db.productos.find(x=>x.id===id); 
                 p.sku=s; p.categoria=c; p.nombre=n; p.desc=desc; p.precio=pr; p.cantidad=cant; 
             } else { 
-                db.productos.push({id:'id'+Date.now(), sku:s, categoria:c, nombre:n, desc:desc, precio:pr, cantidad:cant, imagenBase64:''}); 
+                p = {id:'id'+Date.now(), sku:s, categoria:c, nombre:n, desc:desc, precio:pr, cantidad:cant, imagenBase64:''};
+                db.productos.push(p); 
             }
             
             cerrarModal('modal-stock'); renderStock(); renderCats(); mostrarToast('Guardado', 'bg-[#10b981]');
-            guardarBD(); 
+            
+            guardarLocal(db);
+            if (esModoNube) {
+                firestoreDb.collection("lite_erp").doc("tienda_base").collection("productos").doc(p.id).set(p, {merge:true});
+            }
         }
         
         function delP(id) { 
-            if(confirm('¿Borrar?')) { 
+            if(confirm('¿Borrar este producto?')) { 
                 db.productos = db.productos.filter(x => x.id !== id); 
                 renderStock(); renderCats();
-                guardarBD();
+                guardarLocal(db);
+                if(esModoNube) firestoreDb.collection("lite_erp").doc("tienda_base").collection("productos").doc(id).delete();
             } 
         }
 
-        function vaciarCatalogo() { 
+        async function vaciarCatalogo() { 
             if(confirm('⚠️ ¿Borrar TODOS los productos de la base de datos?')) { 
                 db.productos=[]; 
                 renderStock(); renderCats(); 
                 mostrarToast('Catálogo Vaciado', 'bg-[#ef4444]');
-                guardarBD();
+                guardarLocal(db);
+                
+                if(esModoNube) {
+                    const snap = await firestoreDb.collection("lite_erp").doc("tienda_base").collection("productos").get();
+                    const b = firestoreDb.batch();
+                    snap.docs.forEach(d => b.delete(d.ref));
+                    await b.commit();
+                }
             } 
         }
 
@@ -849,7 +876,7 @@
                 db.productos.forEach(x=>x.precio=Math.round(x.precio*m)); 
                 renderStock(); renderTiendaWeb(); 
                 mostrarToast(`Aumento aplicado: ${pct}%`, 'bg-[#10b981]'); 
-                guardarBD();
+                guardarBD(); // Usa batch internamente
             }
         }
 
@@ -873,7 +900,6 @@
                         let pr = parseFloat(String(row[cp]).replace(',','.')) || 0;
                         let cat = ccat !== -1 ? String(row[ccat]||'').toUpperCase().trim() : 'VARIOS';
                         
-                        // BUGFIX EXCEL PARSER: Resguardar celdas de stock vacías a 999 para evitar que oculten el producto.
                         let valStock = row[ccant];
                         let cant = (ccant !== -1 && valStock != null && String(valStock).trim() !== '') ? parseInt(valStock) : 999;
                         if(isNaN(cant)) cant = 0; 
@@ -887,7 +913,7 @@
                     document.getElementById('carga-overlay-global').style.display='none'; 
                     e.target.value=''; 
                     mostrarToast("Excel Procesado", "bg-[#10b981]");
-                    guardarBD();
+                    guardarBD(); // Usa batch internamente
                 } catch(err) { mostrarToast(err.message, 'bg-[#ef4444]'); document.getElementById('carga-overlay-global').style.display='none'; e.target.value=''; } 
             }; r.readAsArrayBuffer(f);
         }
@@ -912,7 +938,8 @@
                 renderStock(); 
                 document.getElementById('carga-overlay-global').style.display = 'none'; 
                 mostrarToast('Foto subida', 'bg-[#10b981]');
-                guardarBD();
+                guardarLocal(db);
+                if(esModoNube) firestoreDb.collection("lite_erp").doc("tienda_base").collection("productos").doc(p.id).set({imagenBase64: p.imagenBase64}, {merge:true});
             } catch (err) { document.getElementById('carga-overlay-global').style.display = 'none'; } 
         }
 
@@ -944,15 +971,21 @@
                 }
 
                 if(prod) { 
-                    try { prod.imagenBase64 = await comprimirImagenAsincrona(file); vinculadas++; } catch(err){} 
+                    try { 
+                        document.getElementById('carga-overlay-submsg').innerText = `Procesando: ${file.name} (${i+1}/${files.length})`;
+                        prod.imagenBase64 = await comprimirImagenAsincrona(file); 
+                        if(esModoNube) await firestoreDb.collection("lite_erp").doc("tienda_base").collection("productos").doc(prod.id).set({imagenBase64: prod.imagenBase64}, {merge:true});
+                        vinculadas++; 
+                    } catch(err){} 
                 }
             }
             
+            document.getElementById('carga-overlay-submsg').innerText = "";
             renderStock(); 
             document.getElementById('carga-overlay-global').style.display = 'none'; 
             document.getElementById('input-imagenes-catalogo').value = ''; 
             mostrarToast(`${vinculadas} fotos vinculadas.`, 'bg-[#10b981]'); 
-            guardarBD();
+            guardarLocal(db);
         }
 
         function comprimirImagenAsincrona(file, maxSizeInput = null) {
